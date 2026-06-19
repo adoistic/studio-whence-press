@@ -4,16 +4,17 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL("../vendor/pdfjs/pdf.worker.mjs", 
 
 const $ = (s) => document.querySelector(s);
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+const setState = (s) => { document.body.dataset.state = s; };
 
 let ready = false;
-let pages = [];          // decoded frames awaiting/after conversion
+let pages = [];           // decoded frames awaiting/after conversion
 const pending = new Map(); // id -> resolver
 
 // ---- worker plumbing ----
 worker.onmessage = (e) => {
   const m = e.data;
-  if (m.type === "ready") { ready = true; setStatus("Ready. Drop a file to begin."); }
-  else if (m.type === "error") { setStatus("Error: " + m.message, true); console.error(m.message); }
+  if (m.type === "ready") { ready = true; setState("empty"); }
+  else if (m.type === "error") { setStatus("Something went wrong: " + m.message, { bad: true }); setState("error"); console.error(m.message); }
   else if (m.type === "converted") { pending.get(m.id)?.(m); pending.delete(m.id); }
   else if (m.type === "pdf-done") { saveBlob(new Blob([m.pdf], { type: "application/pdf" }), outName("pdf")); }
   else if (m.type === "tiff-done") { saveBlob(new Blob([m.tiff], { type: "image/tiff" }), outName("tiff", m.index)); }
@@ -22,7 +23,6 @@ worker.onmessage = (e) => {
 const call = (msg, transfer) => new Promise((res) => { pending.set(msg.id, res); worker.postMessage(msg, transfer || []); });
 
 (async function init() {
-  setStatus("Loading colour engine…");
   const icc = await (await fetch("./assets/fogra52.icc")).arrayBuffer();
   worker.postMessage({ type: "init", icc }, [icc]);
 })();
@@ -69,21 +69,22 @@ function frameFromCanvas(c, name) {
 // ---- pipeline ----
 let convertSeq = 0;
 async function handleFiles(fileList) {
-  if (!ready) { setStatus("Engine still loading — one moment…"); return; }
+  if (!ready) { setStatus("The colour engine is still loading — one moment…", { spin: true }); return; }
   const files = [...fileList].filter((f) => /image\/|pdf/.test(f.type) || /\.(png|jpe?g|tiff?|webp|pdf)$/i.test(f.name));
-  if (!files.length) { setStatus("Drop PNG, JPG, TIFF, WebP or PDF files.", true); return; }
-  setBusy(true);
-  setStatus("Reading files…");
+  if (!files.length) { setStatus("Please drop PDF, PNG, JPG, TIFF or WebP files.", { bad: true }); setState("error"); return; }
+
+  setState("working");
+  setStatus("Reading files…", { spin: true });
   pages = [];
   worker.postMessage({ type: "reset" });
   for (const f of files) {
     try { pages.push(...await decodeFile(f)); }
-    catch (err) { setStatus(`Could not read ${f.name}: ${err.message}`, true); }
+    catch (err) { setStatus(`Could not read ${f.name}: ${err.message}`, { bad: true }); }
   }
   $("#results").innerHTML = "";
   const opt = settings();
   for (let i = 0; i < pages.length; i++) {
-    setStatus(`Converting ${i + 1} / ${pages.length}…`);
+    setStatus(`Converting page ${i + 1} of ${pages.length}…`, { spin: true });
     const p = pages[i];
     const id = ++convertSeq;
     const res = await call(
@@ -92,9 +93,9 @@ async function handleFiles(fileList) {
     );
     renderResult(p, res);
   }
-  $("#download-bar").hidden = pages.length === 0;
-  setBusy(false);
-  setStatus(`Done — ${pages.length} page${pages.length === 1 ? "" : "s"} converted. Everything stayed on your device.`);
+  const n = pages.length;
+  $("#done-count").textContent = `${n} page${n === 1 ? "" : "s"} converted`;
+  setState("done");
 }
 
 // ---- rendering results ----
@@ -104,31 +105,31 @@ function renderResult(page, res) {
   proof.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(res.proof), res.width, res.height), 0, 0);
   const proofURL = proof.toDataURL("image/png");
 
-  const row = document.createElement("div");
-  row.className = "row";
-  row.innerHTML = `
-    <div class="ba">
-      <figure><img src="${page.originalURL}" alt="original"><figcaption>RGB</figcaption></figure>
-      <figure><img src="${proofURL}" alt="cmyk proof"><figcaption>CMYK proof</figcaption></figure>
+  const card = document.createElement("article");
+  card.className = "card";
+  card.innerHTML = `
+    <div class="thumbs">
+      <figure><img class="thumb" src="${page.originalURL}" alt="original"><figcaption>RGB</figcaption></figure>
+      <span class="to" aria-hidden="true">→</span>
+      <figure><img class="thumb" src="${proofURL}" alt="CMYK proof"><figcaption>CMYK</figcaption></figure>
     </div>
-    <div class="meta">
-      <div class="name">${escapeHtml(page.name)} <span class="tac">TAC ≤ ${res.tac}%</span></div>
-      <div class="sub">DeviceCMYK · lossless · K-only black</div>
-      <div class="dl">
-        <button data-tiff="${res.index}">↓ CMYK TIFF</button>
-        <button data-jpeg="${res.index}">↓ CMYK JPEG</button>
-        <a data-png>↓ Soft-proof PNG</a>
+    <div class="card-body">
+      <div class="card-name">${escapeHtml(page.name)} <span class="tac">TAC ≤ ${res.tac}%</span></div>
+      <div class="card-fmts">
+        <button data-tiff>CMYK TIFF</button>
+        <button data-jpeg>CMYK JPEG</button>
+        <button data-png>Soft-proof PNG</button>
       </div>
     </div>`;
-  row.querySelector("[data-tiff]").onclick = () => worker.postMessage({ type: "tiff", index: res.index, dpi: settings().dpi });
-  row.querySelector("[data-jpeg]").onclick = () => worker.postMessage({ type: "jpeg", index: res.index, quality: 90 });
-  const png = row.querySelector("[data-png]");
-  png.onclick = () => proof.toBlob((b) => saveBlob(b, `${stem(page.name)}-CMYK-proof.png`));
-  $("#results").appendChild(row);
+  card.querySelector("[data-tiff]").onclick = () => worker.postMessage({ type: "tiff", index: res.index, dpi: settings().dpi });
+  card.querySelector("[data-jpeg]").onclick = () => worker.postMessage({ type: "jpeg", index: res.index, quality: 90 });
+  card.querySelector("[data-png]").onclick = () => proof.toBlob((b) => saveBlob(b, `${stem(page.name)}-CMYK-proof.png`));
+  $("#results").appendChild(card);
 }
 
 // ---- downloads ----
 $("#dl-pdf").onclick = () => { if (pages.length) worker.postMessage({ type: "pdf", dpi: settings().dpi }); };
+$("#clear").onclick = () => { pages = []; $("#results").innerHTML = ""; worker.postMessage({ type: "reset" }); setState("empty"); };
 
 function outName(kind, index) {
   const base = pages[0] ? stem(pages[0].name) : "studio-whence";
@@ -147,15 +148,20 @@ function saveBlob(blob, name) {
 // ---- helpers ----
 const stem = (n) => n.replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "_");
 const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-function setStatus(t, bad) { const el = $("#status"); el.textContent = t; el.classList.toggle("bad", !!bad); }
-function setBusy(b) { $("#drop").classList.toggle("busy", b); }
+function setStatus(t, { bad = false, spin = false } = {}) {
+  const el = $("#status");
+  el.innerHTML = (spin ? '<span class="spin"></span>' : "") + escapeHtml(t);
+  el.classList.toggle("bad", bad);
+}
 
 // ---- drop + input wiring ----
 const drop = $("#drop");
+const fileInput = $("#file");
+drop.addEventListener("click", () => fileInput.click());
+drop.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); } });
 ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("hover"); }));
 ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("hover"); }));
 drop.addEventListener("drop", (e) => handleFiles(e.dataTransfer.files));
-$("#file").addEventListener("change", (e) => handleFiles(e.target.files));
-$("#adv-toggle").addEventListener("click", () => $("#adv").classList.toggle("open"));
-// live labels
-for (const id of ["sat", "con"]) $("#" + id).addEventListener("input", (e) => $("#" + id + "-val").textContent = e.target.value);
+fileInput.addEventListener("change", (e) => { handleFiles(e.target.files); e.target.value = ""; });
+// live labels for the advanced sliders
+for (const id of ["sat", "con"]) $("#" + id).addEventListener("input", (e) => ($("#" + id + "-val").textContent = e.target.value));
