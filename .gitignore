@@ -1,7 +1,7 @@
 node_modules/
 _*.mjs
 _*.js
-_out.*
+_out*
 ref_*.bin
 *_result.txt
 stress_rgb.png
