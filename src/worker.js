@@ -75,6 +75,20 @@ self.onmessage = async (e) => {
       const p = store[m.index];
       const jpg = encodeCmykJpeg(p.cmyk, p.width, p.height, m.quality || 90);
       post({ type: "jpeg-done", index: m.index, jpeg: jpg.buffer }, [jpg.buffer]);
+
+    } else if (m.type === "bundle") {
+      // Build every CMYK artifact for the whole job, returned (not saved) for zipping.
+      const files = [], transfer = [];
+      const pdf = await buildCmykPDF(store, m.dpi);
+      files.push({ name: m.names.pdf, bytes: pdf }); transfer.push(pdf.buffer);
+      for (let i = 0; i < store.length; i++) {
+        const p = store[i];
+        const tiff = await buildCmykTIFF(p.cmyk, p.width, p.height, m.dpi, iccBytes);
+        const jpg = encodeCmykJpeg(p.cmyk, p.width, p.height, 90);
+        files.push({ name: m.names.tiff[i], bytes: tiff }); transfer.push(tiff.buffer);
+        files.push({ name: m.names.jpeg[i], bytes: jpg }); transfer.push(jpg.buffer);
+      }
+      post({ type: "bundle-done", files }, transfer);
     }
   } catch (err) {
     post({ type: "error", message: String(err && err.message || err) });
