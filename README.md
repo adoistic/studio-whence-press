@@ -10,6 +10,7 @@ Drop a PDF or images (PNG, JPG, TIFF, WebP). The app produces:
 
 - **A combined DeviceCMYK PDF** — lossless (FlateDecode), one page per input page, in order.
 - **A CMYK TIFF per image** — lossless, with the ICC profile embedded.
+- **A CMYK JPEG per image** — Adobe-marked 4-component CMYK, for quick proofs and email (lossy — not for final print).
 - **A soft-proof PNG** — an on-screen simulation of how the ink will look.
 
 The conversion is **colour-managed**, not a naive channel swap:

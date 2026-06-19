@@ -6,6 +6,7 @@ import {
 } from "../vendor/lcms/lcms.js";
 import { boost, kOnly, maxTAC, DEFAULTS } from "./engine.js";
 import { buildCmykPDF, buildCmykTIFF } from "./writers.js";
+import { encodeCmykJpeg } from "./jpeg_cmyk.js";
 
 let lcms, fwd, rev, iccBytes;
 const store = [];   // converted pages in drop order: { cmyk, width, height }
@@ -69,6 +70,11 @@ self.onmessage = async (e) => {
       const p = store[m.index];
       const tiff = await buildCmykTIFF(p.cmyk, p.width, p.height, m.dpi, iccBytes);
       post({ type: "tiff-done", index: m.index, tiff: tiff.buffer }, [tiff.buffer]);
+
+    } else if (m.type === "jpeg") {
+      const p = store[m.index];
+      const jpg = encodeCmykJpeg(p.cmyk, p.width, p.height, m.quality || 90);
+      post({ type: "jpeg-done", index: m.index, jpeg: jpg.buffer }, [jpg.buffer]);
     }
   } catch (err) {
     post({ type: "error", message: String(err && err.message || err) });

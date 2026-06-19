@@ -17,6 +17,7 @@ worker.onmessage = (e) => {
   else if (m.type === "converted") { pending.get(m.id)?.(m); pending.delete(m.id); }
   else if (m.type === "pdf-done") { saveBlob(new Blob([m.pdf], { type: "application/pdf" }), outName("pdf")); }
   else if (m.type === "tiff-done") { saveBlob(new Blob([m.tiff], { type: "image/tiff" }), outName("tiff", m.index)); }
+  else if (m.type === "jpeg-done") { saveBlob(new Blob([m.jpeg], { type: "image/jpeg" }), outName("jpeg", m.index)); }
 };
 const call = (msg, transfer) => new Promise((res) => { pending.set(msg.id, res); worker.postMessage(msg, transfer || []); });
 
@@ -115,10 +116,12 @@ function renderResult(page, res) {
       <div class="sub">DeviceCMYK · lossless · K-only black</div>
       <div class="dl">
         <button data-tiff="${res.index}">↓ CMYK TIFF</button>
+        <button data-jpeg="${res.index}">↓ CMYK JPEG</button>
         <a data-png>↓ Soft-proof PNG</a>
       </div>
     </div>`;
   row.querySelector("[data-tiff]").onclick = () => worker.postMessage({ type: "tiff", index: res.index, dpi: settings().dpi });
+  row.querySelector("[data-jpeg]").onclick = () => worker.postMessage({ type: "jpeg", index: res.index, quality: 90 });
   const png = row.querySelector("[data-png]");
   png.onclick = () => proof.toBlob((b) => saveBlob(b, `${stem(page.name)}-CMYK-proof.png`));
   $("#results").appendChild(row);
@@ -131,6 +134,7 @@ function outName(kind, index) {
   const base = pages[0] ? stem(pages[0].name) : "studio-whence";
   if (kind === "pdf") return `${base}-CMYK-FOGRA52.pdf`;
   if (kind === "tiff") return `${stem(pages[index]?.name || base)}-CMYK-FOGRA52.tiff`;
+  if (kind === "jpeg") return `${stem(pages[index]?.name || base)}-CMYK-FOGRA52.jpg`;
   return `${base}.bin`;
 }
 function saveBlob(blob, name) {
