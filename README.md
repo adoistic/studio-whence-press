@@ -48,6 +48,12 @@ node _e2e.mjs                    # Playwright end-to-end (needs a local server r
 
 Vendored runtime (in `vendor/`): [lcms-wasm](https://www.npmjs.com/package/lcms-wasm) (LittleCMS) and [pdf.js](https://mozilla.github.io/pdf.js/).
 
+## License
+
+This project's code is released under the [MIT License](LICENSE).
+
+Bundled third-party components keep their own licenses: **lcms-wasm** / LittleCMS (MIT), **pdf.js** (Apache-2.0), and the **PSO Uncoated v3 (FOGRA52)** ICC profile (© ECI / Heidelberg, freely redistributable — see `assets/PROFILE-LICENSE.md`).
+
 ---
 
 Made by Adnan · Studio Whence.
