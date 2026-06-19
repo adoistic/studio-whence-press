@@ -1,0 +1,18 @@
+{
+  "name": "studio-whence-press",
+  "version": "1.0.0",
+  "description": "Client-side RGB to print-ready CMYK converter (FOGRA52). Nothing is uploaded.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "serve": "python3 -m http.server 8099",
+    "test:e2e": "node _e2e.mjs"
+  },
+  "author": "Adnan / Studio Whence",
+  "license": "MIT",
+  "devDependencies": {
+    "lcms-wasm": "1.0.5",
+    "pdfjs-dist": "4.7.76",
+    "playwright": "1.48.0"
+  }
+}

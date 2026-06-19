@@ -1,0 +1,11 @@
+node_modules/
+_*.mjs
+_*.js
+_out.*
+ref_*.bin
+*_result.txt
+stress_rgb.png
+test_artwork.png
+test_doc.pdf
+/fogra52.icc
+/_probe*
