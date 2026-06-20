@@ -1,17 +1,55 @@
-// worker.js — owns the WASM colour engine off the main thread. Receives decoded
-// RGBA frames, runs boost → lcms transform → K-only, and assembles CMYK output.
+// worker.js — owns the WASM colour engine off the main thread.
+// Two paths:
+//  • convert  — preview: converts a page, keeps its CMYK (capped set) so the
+//               per-card TIFF/JPEG buttons work, and returns a soft-proof.
+//  • streampage — stateless: converts one page and returns only the requested
+//               artifacts (deflated PDF image / TIFF / JPEG / proof PNG), then
+//               frees everything. This is the path the large-job streamers use,
+//               so nothing accumulates regardless of page count.
 import {
   instantiate, TYPE_RGB_8, TYPE_CMYK_8, INTENT_PERCEPTUAL,
   cmsFLAGS_BLACKPOINTCOMPENSATION,
 } from "../vendor/lcms/lcms.js";
 import { boost, kOnly, maxTAC, DEFAULTS } from "./engine.js";
-import { buildCmykPDF, buildCmykTIFF } from "./writers.js";
+import { buildCmykTIFF, deflate } from "./writers.js";
 import { encodeCmykJpeg } from "./jpeg_cmyk.js";
 
 let lcms, fwd, rev, iccBytes;
-const store = [];   // converted pages in drop order: { cmyk, width, height }
+const store = []; // previewed pages only: { cmyk, width, height }
 
 function post(msg, transfer) { self.postMessage(msg, transfer || []); }
+
+// RGBA (composited over white) → print-ready DeviceCMYK.
+function toCmyk(rgba, width, height, settings) {
+  const n = width * height;
+  const px = rgba;
+  const rgb = new Uint8Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const a = px[i * 4 + 3] / 255;
+    rgb[i * 3]     = Math.round(px[i * 4] * a + 255 * (1 - a));
+    rgb[i * 3 + 1] = Math.round(px[i * 4 + 1] * a + 255 * (1 - a));
+    rgb[i * 3 + 2] = Math.round(px[i * 4 + 2] * a + 255 * (1 - a));
+  }
+  const opt = { ...DEFAULTS, ...(settings || {}) };
+  const boosted = boost(rgb, n, opt.sat, opt.con);
+  const cmykRaw = Uint8Array.from(lcms.cmsDoTransform(fwd, boosted, n));
+  return kOnly(cmykRaw, rgb, n, opt);
+}
+
+// CMYK → soft-proof PNG bytes (reverse transform + OffscreenCanvas encode).
+async function proofPng(cmyk, width, height) {
+  const n = width * height;
+  const proofRgb = Uint8Array.from(lcms.cmsDoTransform(rev, cmyk, n));
+  const rgba = new Uint8ClampedArray(n * 4);
+  for (let i = 0; i < n; i++) {
+    rgba[i * 4] = proofRgb[i * 3]; rgba[i * 4 + 1] = proofRgb[i * 3 + 1];
+    rgba[i * 4 + 2] = proofRgb[i * 3 + 2]; rgba[i * 4 + 3] = 255;
+  }
+  const oc = new OffscreenCanvas(width, height);
+  oc.getContext("2d").putImageData(new ImageData(rgba, width, height), 0, 0);
+  const blob = await oc.convertToBlob({ type: "image/png" });
+  return new Uint8Array(await blob.arrayBuffer());
+}
 
 self.onmessage = async (e) => {
   const m = e.data;
@@ -30,67 +68,35 @@ self.onmessage = async (e) => {
       store.length = 0;
       post({ type: "reset-done" });
 
-    } else if (m.type === "convert") {
+    } else if (m.type === "convert") {              // preview path (keeps CMYK)
       const { id, rgba, width, height, settings } = m;
-      const n = width * height;
-      const px = new Uint8Array(rgba);
-      // Composite over white and drop alpha → RGB.
-      const rgb = new Uint8Array(n * 3);
-      for (let i = 0; i < n; i++) {
-        const a = px[i * 4 + 3] / 255;
-        rgb[i * 3]     = Math.round(px[i * 4] * a + 255 * (1 - a));
-        rgb[i * 3 + 1] = Math.round(px[i * 4 + 1] * a + 255 * (1 - a));
-        rgb[i * 3 + 2] = Math.round(px[i * 4 + 2] * a + 255 * (1 - a));
-      }
-      const opt = { ...DEFAULTS, ...(settings || {}) };
-      const boosted = boost(rgb, n, opt.sat, opt.con);
-      const cmykRaw = Uint8Array.from(lcms.cmsDoTransform(fwd, boosted, n));
-      const cmyk = kOnly(cmykRaw, rgb, n, opt);
-      const tac = maxTAC(cmyk, n);
-      store.push({ cmyk, width, height });
+      const cmyk = toCmyk(new Uint8Array(rgba), width, height, settings);
+      const index = store.push({ cmyk, width, height }) - 1;
+      const proof = await proofPng(cmyk, width, height);
+      post({ type: "converted", id, index, width, height, tac: maxTAC(cmyk, width * height), proof: proof.buffer }, [proof.buffer]);
 
-      // Soft-proof: CMYK → sRGB, expand to RGBA for the preview canvas.
-      const proofRgb = Uint8Array.from(lcms.cmsDoTransform(rev, cmyk, n));
-      const proof = new Uint8ClampedArray(n * 4);
-      for (let i = 0; i < n; i++) {
-        proof[i * 4] = proofRgb[i * 3]; proof[i * 4 + 1] = proofRgb[i * 3 + 1];
-        proof[i * 4 + 2] = proofRgb[i * 3 + 2]; proof[i * 4 + 3] = 255;
-      }
-      const pb = proof.buffer;
-      post({ type: "converted", id, tac, width, height, proof: pb, index: store.length - 1 }, [pb]);
+    } else if (m.type === "streampage") {           // large-job path (stateless)
+      const { id, rgba, width, height, settings, want, dpi } = m;
+      const cmyk = toCmyk(new Uint8Array(rgba), width, height, settings);
+      const out = { type: "page-done", id, width, height, tac: maxTAC(cmyk, width * height) };
+      const transfer = [];
+      if (want.includes("pdf"))   { const d = await deflate(cmyk);                              out.pdfImg = d.buffer; transfer.push(d.buffer); }
+      if (want.includes("tiff"))  { const t = await buildCmykTIFF(cmyk, width, height, dpi, iccBytes); out.tiff = t.buffer; transfer.push(t.buffer); }
+      if (want.includes("jpeg"))  { const j = encodeCmykJpeg(cmyk, width, height, 90);          out.jpeg = j.buffer; transfer.push(j.buffer); }
+      if (want.includes("proof")) { const p = await proofPng(cmyk, width, height);              out.proof = p.buffer; transfer.push(p.buffer); }
+      post(out, transfer);
 
-    } else if (m.type === "pdf") {
-      const pdf = await buildCmykPDF(store, m.dpi);
-      // sanity asserts mirroring the Python tool
-      const head = new TextDecoder("latin1").decode(pdf.subarray(0, Math.min(pdf.length, 4096)));
-      const ok = pdf.length > 0;
-      post({ type: "pdf-done", pdf: pdf.buffer, ok }, [pdf.buffer]);
-
-    } else if (m.type === "tiff") {
+    } else if (m.type === "tiff") {                 // per-card (previewed page)
       const p = store[m.index];
       const tiff = await buildCmykTIFF(p.cmyk, p.width, p.height, m.dpi, iccBytes);
       post({ type: "tiff-done", index: m.index, tiff: tiff.buffer }, [tiff.buffer]);
 
-    } else if (m.type === "jpeg") {
+    } else if (m.type === "jpeg") {                 // per-card (previewed page)
       const p = store[m.index];
       const jpg = encodeCmykJpeg(p.cmyk, p.width, p.height, m.quality || 90);
       post({ type: "jpeg-done", index: m.index, jpeg: jpg.buffer }, [jpg.buffer]);
-
-    } else if (m.type === "bundle") {
-      // Build every CMYK artifact for the whole job, returned (not saved) for zipping.
-      const files = [], transfer = [];
-      const pdf = await buildCmykPDF(store, m.dpi);
-      files.push({ name: m.names.pdf, bytes: pdf }); transfer.push(pdf.buffer);
-      for (let i = 0; i < store.length; i++) {
-        const p = store[i];
-        const tiff = await buildCmykTIFF(p.cmyk, p.width, p.height, m.dpi, iccBytes);
-        const jpg = encodeCmykJpeg(p.cmyk, p.width, p.height, 90);
-        files.push({ name: m.names.tiff[i], bytes: tiff }); transfer.push(tiff.buffer);
-        files.push({ name: m.names.jpeg[i], bytes: jpg }); transfer.push(jpg.buffer);
-      }
-      post({ type: "bundle-done", files }, transfer);
     }
   } catch (err) {
-    post({ type: "error", message: String(err && err.message || err) });
+    post({ type: "error", id: m.id, message: String((err && err.message) || err) });
   }
 };
